@@ -3,7 +3,7 @@ package lru
 import (
 	"sync"
 
-	"github.com/hashicorp/golang-lru/v2/simplelru"
+	"github.com/sentioxyz/golang-lru/simplelru"
 )
 
 const (
@@ -28,6 +28,16 @@ func New[K comparable, V any](size int) (*Cache[K, V], error) {
 // NewWithEvict constructs a fixed size cache with the given eviction
 // callback.
 func NewWithEvict[K comparable, V any](size int, onEvicted func(key K, value V)) (c *Cache[K, V], err error) {
+	return NewWithWeightLimitAndEvict(size, 0, nil, onEvicted)
+}
+
+// NewWithWeightLimitAndEvict constructs a fixed size cache with the weight limit and given eviction callback.
+func NewWithWeightLimitAndEvict[K comparable, V any](
+	size int,
+	weightLimit uint64,
+	weightCalculator func(value V) uint64,
+	onEvicted func(key K, value V),
+) (c *Cache[K, V], err error) {
 	// create a cache with default settings
 	c = &Cache[K, V]{
 		onEvictedCB: onEvicted,
@@ -36,7 +46,7 @@ func NewWithEvict[K comparable, V any](size int, onEvicted func(key K, value V))
 		c.initEvictBuffers()
 		onEvicted = c.onEvicted
 	}
-	c.lru, err = simplelru.NewLRU(size, onEvicted)
+	c.lru, err = simplelru.NewLRUWithWeightLimit(size, weightLimit, weightCalculator, onEvicted)
 	return
 }
 
@@ -52,39 +62,51 @@ func (c *Cache[K, V]) onEvicted(k K, v V) {
 	c.evictedVals = append(c.evictedVals, v)
 }
 
+func (c *Cache[K, V]) collectEvicted(purge bool) (evictedKeys []K, evictedVals []V) {
+	count := len(c.evictedKeys)
+	if count == 0 {
+		return
+	}
+	if purge {
+		evictedKeys, evictedVals = c.evictedKeys, c.evictedVals
+		c.initEvictBuffers()
+	} else {
+		evictedKeys, evictedVals = make([]K, count), make([]V, count)
+		copy(evictedKeys, c.evictedKeys)
+		copy(evictedVals, c.evictedVals)
+		c.evictedKeys, c.evictedVals = c.evictedKeys[:0], c.evictedVals[:0]
+	}
+	return
+}
+
+func (c *Cache[K, V]) callEvictCB(evictedKeys []K, evictedVals []V) {
+	for i := 0; i < len(evictedKeys); i++ {
+		c.onEvictedCB(evictedKeys[i], evictedVals[i])
+	}
+}
+
 // Purge is used to completely clear the cache.
 func (c *Cache[K, V]) Purge() {
-	var ks []K
-	var vs []V
 	c.lock.Lock()
 	c.lru.Purge()
 	if c.onEvictedCB != nil && len(c.evictedKeys) > 0 {
-		ks, vs = c.evictedKeys, c.evictedVals
-		c.initEvictBuffers()
+		ks, vs := c.collectEvicted(true)
+		// invoke callback outside of critical section
+		defer c.callEvictCB(ks, vs)
 	}
 	c.lock.Unlock()
-	// invoke callback outside of critical section
-	if c.onEvictedCB != nil {
-		for i := 0; i < len(ks); i++ {
-			c.onEvictedCB(ks[i], vs[i])
-		}
-	}
 }
 
 // Add adds a value to the cache. Returns true if an eviction occurred.
 func (c *Cache[K, V]) Add(key K, value V) (evicted bool) {
-	var k K
-	var v V
 	c.lock.Lock()
 	evicted = c.lru.Add(key, value)
 	if c.onEvictedCB != nil && evicted {
-		k, v = c.evictedKeys[0], c.evictedVals[0]
-		c.evictedKeys, c.evictedVals = c.evictedKeys[:0], c.evictedVals[:0]
+		ks, vs := c.collectEvicted(false)
+		// invoke callback outside of critical section
+		defer c.callEvictCB(ks, vs)
 	}
 	c.lock.Unlock()
-	if c.onEvictedCB != nil && evicted {
-		c.onEvictedCB(k, v)
-	}
 	return
 }
 
@@ -118,8 +140,6 @@ func (c *Cache[K, V]) Peek(key K) (value V, ok bool) {
 // recent-ness or deleting it for being stale, and if not, adds the value.
 // Returns whether found and whether an eviction occurred.
 func (c *Cache[K, V]) ContainsOrAdd(key K, value V) (ok, evicted bool) {
-	var k K
-	var v V
 	c.lock.Lock()
 	if c.lru.Contains(key) {
 		c.lock.Unlock()
@@ -127,13 +147,11 @@ func (c *Cache[K, V]) ContainsOrAdd(key K, value V) (ok, evicted bool) {
 	}
 	evicted = c.lru.Add(key, value)
 	if c.onEvictedCB != nil && evicted {
-		k, v = c.evictedKeys[0], c.evictedVals[0]
-		c.evictedKeys, c.evictedVals = c.evictedKeys[:0], c.evictedVals[:0]
+		ks, vs := c.collectEvicted(false)
+		// invoke callback outside of critical section
+		defer c.callEvictCB(ks, vs)
 	}
 	c.lock.Unlock()
-	if c.onEvictedCB != nil && evicted {
-		c.onEvictedCB(k, v)
-	}
 	return false, evicted
 }
 
@@ -141,8 +159,6 @@ func (c *Cache[K, V]) ContainsOrAdd(key K, value V) (ok, evicted bool) {
 // recent-ness or deleting it for being stale, and if not, adds the value.
 // Returns whether found and whether an eviction occurred.
 func (c *Cache[K, V]) PeekOrAdd(key K, value V) (previous V, ok, evicted bool) {
-	var k K
-	var v V
 	c.lock.Lock()
 	previous, ok = c.lru.Peek(key)
 	if ok {
@@ -151,66 +167,63 @@ func (c *Cache[K, V]) PeekOrAdd(key K, value V) (previous V, ok, evicted bool) {
 	}
 	evicted = c.lru.Add(key, value)
 	if c.onEvictedCB != nil && evicted {
-		k, v = c.evictedKeys[0], c.evictedVals[0]
-		c.evictedKeys, c.evictedVals = c.evictedKeys[:0], c.evictedVals[:0]
+		ks, vs := c.collectEvicted(false)
+		// invoke callback outside of critical section
+		defer c.callEvictCB(ks, vs)
 	}
 	c.lock.Unlock()
-	if c.onEvictedCB != nil && evicted {
-		c.onEvictedCB(k, v)
-	}
 	return
 }
 
 // Remove removes the provided key from the cache.
 func (c *Cache[K, V]) Remove(key K) (present bool) {
-	var k K
-	var v V
 	c.lock.Lock()
 	present = c.lru.Remove(key)
 	if c.onEvictedCB != nil && present {
-		k, v = c.evictedKeys[0], c.evictedVals[0]
-		c.evictedKeys, c.evictedVals = c.evictedKeys[:0], c.evictedVals[:0]
+		ks, vs := c.collectEvicted(false)
+		// invoke callback outside of critical section
+		defer c.callEvictCB(ks, vs)
 	}
 	c.lock.Unlock()
-	if c.onEvictedCB != nil && present {
-		c.onEvictedCB(k, v)
-	}
 	return
 }
 
 // Resize changes the cache size.
 func (c *Cache[K, V]) Resize(size int) (evicted int) {
-	var ks []K
-	var vs []V
 	c.lock.Lock()
 	evicted = c.lru.Resize(size)
 	if c.onEvictedCB != nil && evicted > 0 {
-		ks, vs = c.evictedKeys, c.evictedVals
-		c.initEvictBuffers()
+		ks, vs := c.collectEvicted(true)
+		// invoke callback outside of critical section
+		defer c.callEvictCB(ks, vs)
 	}
 	c.lock.Unlock()
+	return evicted
+}
+
+// ResetWeightLimit changes the weight limit.
+func (c *Cache[K, V]) ResetWeightLimit(weightLimit uint64) (evicted int) {
+	c.lock.Lock()
+	evicted = c.lru.ResetWeightLimit(weightLimit)
 	if c.onEvictedCB != nil && evicted > 0 {
-		for i := 0; i < len(ks); i++ {
-			c.onEvictedCB(ks[i], vs[i])
-		}
+		ks, vs := c.collectEvicted(true)
+		// invoke callback outside of critical section
+		defer c.callEvictCB(ks, vs)
 	}
+	c.lock.Unlock()
 	return evicted
 }
 
 // RemoveOldest removes the oldest item from the cache.
 func (c *Cache[K, V]) RemoveOldest() (key K, value V, ok bool) {
-	var k K
-	var v V
 	c.lock.Lock()
 	key, value, ok = c.lru.RemoveOldest()
 	if c.onEvictedCB != nil && ok {
-		k, v = c.evictedKeys[0], c.evictedVals[0]
-		c.evictedKeys, c.evictedVals = c.evictedKeys[:0], c.evictedVals[:0]
+		ks, vs := c.collectEvicted(true)
+		// invoke callback outside of critical section
+		defer c.callEvictCB(ks, vs)
 	}
 	c.lock.Unlock()
-	if c.onEvictedCB != nil && ok {
-		c.onEvictedCB(k, v)
-	}
 	return
 }
 

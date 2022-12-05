@@ -21,6 +21,9 @@ type entry[K comparable, V any] struct {
 
 	// The value stored with this element.
 	value V
+
+	// The weight of value
+	weight uint64
 }
 
 // prevEntry returns the previous list element or nil.

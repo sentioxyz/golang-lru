@@ -37,4 +37,7 @@ type LRUCache[K comparable, V any] interface {
 
 	// Resizes cache, returning number evicted
 	Resize(int) int
+
+	// Reset weight limit, returning number evicted
+	ResetWeightLimit(uint64) int
 }

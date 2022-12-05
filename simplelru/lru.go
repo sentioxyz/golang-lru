@@ -7,16 +7,32 @@ import (
 // EvictCallback is used to get a callback when a cache entry is evicted
 type EvictCallback[K comparable, V any] func(key K, value V)
 
+// WeightCalculator is used to calculate the weight of a value
+type WeightCalculator[V any] func(value V) uint64
+
 // LRU implements a non-thread safe fixed size LRU cache
 type LRU[K comparable, V any] struct {
 	size      int
 	evictList *lruList[K, V]
 	items     map[K]*entry[K, V]
 	onEvict   EvictCallback[K, V]
+
+	weightTotal      uint64
+	weightLimit      uint64
+	weightCalculator WeightCalculator[V]
 }
 
 // NewLRU constructs an LRU of the given size
 func NewLRU[K comparable, V any](size int, onEvict EvictCallback[K, V]) (*LRU[K, V], error) {
+	return NewLRUWithWeightLimit(size, 0, nil, onEvict)
+}
+
+func NewLRUWithWeightLimit[K comparable, V any](
+	size int,
+	weightLimit uint64,
+	weightCalculator WeightCalculator[V],
+	onEvict EvictCallback[K, V],
+) (*LRU[K, V], error) {
 	if size <= 0 {
 		return nil, errors.New("must provide a positive size")
 	}
@@ -26,6 +42,9 @@ func NewLRU[K comparable, V any](size int, onEvict EvictCallback[K, V]) (*LRU[K,
 		evictList: newList[K, V](),
 		items:     make(map[K]*entry[K, V]),
 		onEvict:   onEvict,
+
+		weightLimit:      weightLimit,
+		weightCalculator: weightCalculator,
 	}
 	return c, nil
 }
@@ -47,19 +66,24 @@ func (c *LRU[K, V]) Add(key K, value V) (evicted bool) {
 	if ent, ok := c.items[key]; ok {
 		c.evictList.moveToFront(ent)
 		ent.value = value
-		return false
+
+		if c.weightCalculator != nil {
+			c.weightTotal -= ent.weight
+			ent.weight = c.weightCalculator(value)
+			c.weightTotal += ent.weight
+		}
+		return c.checkEvict() > 0
 	}
 
 	// Add new item
 	ent := c.evictList.pushFront(key, value)
 	c.items[key] = ent
 
-	evict := c.evictList.length() > c.size
-	// Verify size not exceeded
-	if evict {
-		c.removeOldest()
+	if c.weightCalculator != nil {
+		ent.weight = c.weightCalculator(value)
+		c.weightTotal += ent.weight
 	}
-	return evict
+	return c.checkEvict() > 0
 }
 
 // Get looks up a key's value from the cache.
@@ -133,28 +157,32 @@ func (c *LRU[K, V]) Len() int {
 
 // Resize changes the cache size.
 func (c *LRU[K, V]) Resize(size int) (evicted int) {
-	diff := c.Len() - size
-	if diff < 0 {
-		diff = 0
-	}
-	for i := 0; i < diff; i++ {
-		c.removeOldest()
-	}
 	c.size = size
-	return diff
+	return c.checkEvict()
 }
 
-// removeOldest removes the oldest item from the cache.
-func (c *LRU[K, V]) removeOldest() {
-	if ent := c.evictList.back(); ent != nil {
+// ResetWeightLimit changes the weight limit.
+func (c *LRU[K, V]) ResetWeightLimit(weightLimit uint64) (evicted int) {
+	c.weightLimit = weightLimit
+	return c.checkEvict()
+}
+
+// checkEvict removes the oldest items unit size and weightLimit are all safe
+func (c *LRU[K, V]) checkEvict() int {
+	var evicted int
+	for c.evictList.length() > c.size || c.weightTotal > c.weightLimit {
+		ent := c.evictList.back() // never be nil
 		c.removeElement(ent)
+		evicted++
 	}
+	return evicted
 }
 
 // removeElement is used to remove a given list element from the cache
 func (c *LRU[K, V]) removeElement(e *entry[K, V]) {
 	c.evictList.remove(e)
 	delete(c.items, e.key)
+	c.weightTotal -= e.weight
 	if c.onEvict != nil {
 		c.onEvict(e.key, e.value)
 	}

@@ -126,6 +126,68 @@ func TestLRU(t *testing.T) {
 	}
 }
 
+func TestLRUWithWeightLimit(t *testing.T) {
+	evictCounter := 0
+	onEvicted := func(k int, v int) {
+		if k != v {
+			t.Fatalf("Evict values not equal (%v!=%v)", k, v)
+		}
+		evictCounter++
+	}
+	weightCalculator := func(v int) uint64 {
+		if v >= 200 {
+			return uint64(v - 200 + 10)
+		}
+		return uint64(v % 2)
+	}
+	l, err := NewWithWeightLimitAndEvict(100, 10, weightCalculator, onEvicted)
+
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	for i := 0; i < 200; i++ {
+		l.Add(i, i)
+	}
+	// should contains 180 ~ 199
+	if l.Len() != 20 {
+		t.Fatalf("bad len: %v", l.Len())
+	}
+	if evictCounter != 180 {
+		t.Fatalf("bad evict count: %v", evictCounter)
+	}
+	for i := 0; i < 200; i++ {
+		_, ok := l.Get(i)
+		if i < 180 && ok {
+			t.Fatalf("%d should be evicted", i)
+		}
+		if i >= 180 && !ok {
+			t.Fatalf("%d should not be evicted", i)
+		}
+	}
+
+	l.Add(200, 200)
+	// should contains 200
+	if l.Len() != 1 {
+		t.Fatalf("bad len: %v", l.Len())
+	}
+	if _, ok := l.Get(200); !ok {
+		t.Fatalf("200 should not be evicted")
+	}
+
+	l.Add(201, 201)
+	// should be empty
+	if l.Len() != 0 {
+		t.Fatalf("bad len: %v", l.Len())
+	}
+	if _, ok := l.Get(200); ok {
+		t.Fatalf("200 should be evicted")
+	}
+	if _, ok := l.Get(201); ok {
+		t.Fatalf("201 should be evicted")
+	}
+}
+
 // test that Add returns true/false if an eviction occurred
 func TestLRUAdd(t *testing.T) {
 	evictCounter := 0
