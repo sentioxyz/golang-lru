@@ -32,6 +32,9 @@ type LRUCache[K comparable, V any] interface {
 	// Returns the number of items in the cache.
 	Len() int
 
+	// Returns the sum of the weight of all the entries in the cache.
+	WeightTotal() uint64
+
 	// Clears all cache entries.
 	Purge()
 

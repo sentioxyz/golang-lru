@@ -153,6 +153,9 @@ func TestLRUWithWeightLimit(t *testing.T) {
 	if l.Len() != 20 {
 		t.Fatalf("bad len: %v", l.Len())
 	}
+	if l.WeightTotal() != 10 {
+		t.Fatalf("bad weightTotal: %v", l.WeightTotal())
+	}
 	if evictCounter != 180 {
 		t.Fatalf("bad evict count: %v", evictCounter)
 	}
@@ -171,6 +174,9 @@ func TestLRUWithWeightLimit(t *testing.T) {
 	if l.Len() != 1 {
 		t.Fatalf("bad len: %v", l.Len())
 	}
+	if l.WeightTotal() != 10 {
+		t.Fatalf("bad weightTotal: %v", l.WeightTotal())
+	}
 	if _, ok := l.Get(200); !ok {
 		t.Fatalf("200 should not be evicted")
 	}
@@ -179,6 +185,9 @@ func TestLRUWithWeightLimit(t *testing.T) {
 	// should be empty
 	if l.Len() != 0 {
 		t.Fatalf("bad len: %v", l.Len())
+	}
+	if l.WeightTotal() != 0 {
+		t.Fatalf("bad weightTotal: %v", l.WeightTotal())
 	}
 	if _, ok := l.Get(200); ok {
 		t.Fatalf("200 should be evicted")

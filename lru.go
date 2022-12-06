@@ -269,3 +269,11 @@ func (c *Cache[K, V]) Len() int {
 	c.lock.RUnlock()
 	return length
 }
+
+// WeightTotal returns the sum of the weight of all the entries in the cache.
+func (c *Cache[K, V]) WeightTotal() uint64 {
+	c.lock.RLock()
+	weightTotal := c.lru.WeightTotal()
+	c.lock.RUnlock()
+	return weightTotal
+}
